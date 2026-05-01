@@ -28,4 +28,4 @@ jobs:
           GMAIL_ADDRESS:    ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASS:   ${{ secrets.GMAIL_APP_PASS }}
           TO_EMAIL:         ${{ secrets.TO_EMAIL }}
-        run: python morning_brief_final.py
+        run: python morning_brief_v2.py
