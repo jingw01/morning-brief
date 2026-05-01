@@ -19,12 +19,11 @@ GMAIL_ADDRESS    = os.environ["GMAIL_ADDRESS"]
 GMAIL_APP_PASS   = os.environ["GMAIL_APP_PASS"]
 TO_EMAIL         = os.environ.get("TO_EMAIL", GMAIL_ADDRESS)
 CS153_CHANNEL_ID = "UC0YBJCRIt4kA2jZ7siTGMyQ"
-MAX_TRANSCRIPT_CHARS = 12000  # ~3000 tokens — enough for a full lecture
+MAX_TRANSCRIPT_CHARS = 12000
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 def api_call_with_retry(req, timeout=60, retries=4, backoff=20):
-    """Retry on 429 with escalating backoff: 20s, 40s, 60s, 80s."""
     for attempt in range(retries):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -43,10 +42,7 @@ def api_call_with_retry(req, timeout=60, retries=4, backoff=20):
     raise RuntimeError("All retries exhausted")
 
 
-# ── GEMINI (text only — no video file) ───────────────────────────────────────
-
 def call_gemini(prompt: str) -> str:
-    """Call Gemini 1.5 Flash 8B with a text-only prompt."""
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.3, "maxOutputTokens": 1200}
@@ -60,8 +56,6 @@ def call_gemini(prompt: str) -> str:
     result = api_call_with_retry(req, timeout=60)
     return result["candidates"][0]["content"]["parts"][0]["text"].strip()
 
-
-# ── DEEPSEEK ──────────────────────────────────────────────────────────────────
 
 def call_deepseek(system: str, user: str) -> str:
     payload = {
@@ -83,57 +77,91 @@ def call_deepseek(system: str, user: str) -> str:
 # ── CS153 ─────────────────────────────────────────────────────────────────────
 
 def get_latest_cs153_video() -> dict:
-    """Fetch latest CS153 video metadata from YouTube RSS."""
+    print("  [DEBUG] Fetching CS153 RSS feed...")
     try:
         feed_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={CS153_CHANNEL_ID}"
         req = urllib.request.Request(feed_url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=15) as resp:
-            root = ET.fromstring(resp.read())
+            raw = resp.read()
+        print(f"  [DEBUG] RSS feed fetched: {len(raw)} bytes")
+        root = ET.fromstring(raw)
         ns = {"atom": "http://www.w3.org/2005/Atom",
               "yt":   "http://www.youtube.com/xml/schemas/2015",
               "media":"http://search.yahoo.com/mrss/"}
-        entry = root.find("atom:entry", ns)
+
+        # Log all videos found in feed for visibility
+        entries = root.findall("atom:entry", ns)
+        print(f"  [DEBUG] Videos found in RSS: {len(entries)}")
+        for i, e in enumerate(entries[:3]):
+            t = e.findtext("atom:title", default="?", namespaces=ns)
+            vid = e.findtext("yt:videoId", default="?", namespaces=ns)
+            pub = e.findtext("atom:published", default="?", namespaces=ns)
+            print(f"  [DEBUG]   [{i}] {pub[:10]} | {vid} | {t[:60]}")
+
+        entry = entries[0] if entries else None
         if entry is None:
+            print("  [DEBUG] No entries found in RSS!")
             return {}
+
         video_id  = entry.findtext("yt:videoId",    default="", namespaces=ns)
         title     = entry.findtext("atom:title",     default="", namespaces=ns)
         published = entry.findtext("atom:published", default="", namespaces=ns)
         desc_el   = entry.find("media:group/media:description", ns)
         desc      = desc_el.text[:1000] if desc_el is not None else ""
+
+        print(f"  [DEBUG] Selected video: {video_id} | {title[:60]}")
         return {"title": title, "video_id": video_id,
                 "url": f"https://www.youtube.com/watch?v={video_id}",
                 "published": published[:10], "description": desc}
     except Exception as e:
-        print(f"    Could not fetch CS153 RSS: {e}")
+        print(f"  [DEBUG] RSS fetch FAILED: {type(e).__name__}: {e}")
         return {}
 
 
 def get_transcript(video_id: str) -> str:
-    """Fetch YouTube transcript using youtube-transcript-api."""
+    print(f"  [DEBUG] Fetching transcript for video_id={video_id}...")
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
+        from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
+
+        # List available transcripts first
+        try:
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            available = [(t.language_code, t.is_generated) for t in transcript_list]
+            print(f"  [DEBUG] Available transcripts: {available}")
+        except Exception as e:
+            print(f"  [DEBUG] Could not list transcripts: {e}")
+
         transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=["en"])
-        # Join all text chunks into one string
         full_text = " ".join(chunk["text"] for chunk in transcript)
-        # Trim to max chars to keep Gemini prompt reasonable
+        print(f"  [DEBUG] Transcript fetched: {len(full_text):,} chars, {len(transcript)} chunks")
+
         if len(full_text) > MAX_TRANSCRIPT_CHARS:
             full_text = full_text[:MAX_TRANSCRIPT_CHARS] + "... [transcript trimmed]"
-        print(f"    Transcript fetched: {len(full_text):,} chars")
+            print(f"  [DEBUG] Transcript trimmed to {MAX_TRANSCRIPT_CHARS:,} chars")
+
         return full_text
+
     except Exception as e:
-        print(f"    Transcript unavailable: {e}")
+        print(f"  [DEBUG] Transcript FAILED: {type(e).__name__}: {e}")
         return ""
 
 
 def generate_cs153_section(video: dict) -> str:
-    """Generate CS153 digest from transcript (falls back to description)."""
     if not video:
+        print("  [DEBUG] No video data — skipping CS153 section.")
         return "_CS153 video unavailable today._"
 
-    # Try transcript first, fall back to description
     transcript = get_transcript(video.get("video_id", ""))
-    content_label = "TRANSCRIPT" if transcript else "DESCRIPTION"
-    content_text  = transcript if transcript else video.get("description", "No description available.")
+
+    if transcript:
+        content_label = "TRANSCRIPT"
+        content_text  = transcript
+        print("  [DEBUG] Using transcript for Gemini prompt.")
+    else:
+        content_label = "DESCRIPTION"
+        content_text  = video.get("description", "No description available.")
+        print(f"  [DEBUG] Falling back to description ({len(content_text)} chars).")
 
     prompt = f"""You are an expert AI educator. Break down this Stanford CS153 lecture for a motivated learner.
 
@@ -142,7 +170,7 @@ Published: {video['published']}
 {content_label}:
 {content_text}
 
-Produce EXACTLY these sections — no preamble, no intro sentence:
+Produce EXACTLY these sections — no preamble:
 
 WHAT THIS LECTURE IS ABOUT
 One clear sentence.
@@ -151,18 +179,21 @@ KEY CONCEPTS (exactly 4)
 • **Concept Name**: 2 sentences — what it is and why it matters in the real world.
 
 HOW TO APPLY THIS
-3 concrete actionable bullet points someone could act on today — in a project, job, or experiment.
+3 concrete actionable bullet points someone could act on today.
 
 REFLECT ON THIS
 2 thought-provoking questions to sit with after watching.
 
 WATCH: {video['url']}"""
 
+    print(f"  [DEBUG] Sending prompt to Gemini ({len(prompt):,} chars)...")
     try:
-        return call_gemini(prompt)
+        result = call_gemini(prompt)
+        print(f"  [DEBUG] Gemini response: {len(result):,} chars")
+        return result
     except Exception as e:
-        print(f"    Gemini failed ({e}) — skipping CS153, sending news only.")
-        return f"_CS153 digest unavailable today. [Watch directly]({video['url']})_"
+        print(f"  [DEBUG] Gemini FAILED: {type(e).__name__}: {e}")
+        return f"_CS153 digest unavailable today ({type(e).__name__}). [Watch directly]({video['url']})_"
 
 
 # ── NEWS ──────────────────────────────────────────────────────────────────────
@@ -223,28 +254,32 @@ def send_email(subject, html_body):
 def main():
     today = datetime.date.today()
     print(f"[morning_brief] {today} — starting...")
+    print(f"  [DEBUG] TO_EMAIL={os.environ.get('TO_EMAIL', '(not set)')}")
+    print(f"  [DEBUG] GEMINI_API_KEY={'set' if GEMINI_API_KEY else 'MISSING'}")
+    print(f"  [DEBUG] DEEPSEEK_API_KEY={'set' if DEEPSEEK_API_KEY else 'MISSING'}")
 
-    print("  → CS153: fetching latest video...")
+    print("\n  → CS153: fetching latest video...")
     video = get_latest_cs153_video()
 
-    print("  → CS153: fetching transcript...")
-    # transcript is fetched inside generate_cs153_section
+    print("\n  → CS153: generating digest...")
     cs153 = generate_cs153_section(video)
 
     time.sleep(3)
 
-    print("  → DeepSeek: Tech news...")
+    print("\n  → DeepSeek: Tech news...")
     tech = generate_news_section("technology and AI", "TechCrunch, The Verge, Ars Technica")
 
-    print("  → DeepSeek: Politics news...")
+    print("\n  → DeepSeek: Politics news...")
     politics = generate_news_section("US and world politics", "AP News, Politico, Reuters")
 
-    print("  → DeepSeek: Business news...")
+    print("\n  → DeepSeek: Business news...")
     business = generate_news_section("business, markets, and economy", "WSJ, Bloomberg, FT")
 
-    print("  → Sending email...")
+    print("\n  → Sending email...")
     subject = f"☀️ Morning Brief — {today.strftime('%A, %B %d, %Y')}"
-    send_email(subject, build_html(today, cs153, tech, politics, business))
+    html = build_html(today, cs153, tech, politics, business)
+    print(f"  [DEBUG] Email HTML length: {len(html):,} chars")
+    send_email(subject, html)
     print("  ✅ Done!")
 
 
