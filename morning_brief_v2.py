@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Morning Brief — Final Edition
-- Gemini 1.5 Flash 8B → CS153 digest (graceful fallback if quota hit)
-- DeepSeek V3         → Tech / Politics / Business news
-- Gmail SMTP          → email delivery
+Morning Brief — Final Edition (transcript-based CS153)
+- youtube-transcript-api → fetch CS153 transcript (no video processing)
+- Gemini 1.5 Flash 8B   → CS153 digest from transcript text
+- DeepSeek V3           → Tech / Politics / Business news
+- Gmail SMTP            → email delivery
 """
 
 import os, json, time, smtplib, datetime, urllib.request, urllib.error
@@ -18,11 +19,12 @@ GMAIL_ADDRESS    = os.environ["GMAIL_ADDRESS"]
 GMAIL_APP_PASS   = os.environ["GMAIL_APP_PASS"]
 TO_EMAIL         = os.environ.get("TO_EMAIL", GMAIL_ADDRESS)
 CS153_CHANNEL_ID = "UC0YBJCRIt4kA2jZ7siTGMyQ"
+MAX_TRANSCRIPT_CHARS = 12000  # ~3000 tokens — enough for a full lecture
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 def api_call_with_retry(req, timeout=60, retries=4, backoff=20):
-    """Retry on 429 with exponential-ish backoff: 20s, 40s, 60s."""
+    """Retry on 429 with escalating backoff: 20s, 40s, 60s, 80s."""
     for attempt in range(retries):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -32,7 +34,6 @@ def api_call_with_retry(req, timeout=60, retries=4, backoff=20):
                 wait = backoff * (attempt + 1)
                 print(f"    429 rate limit. Waiting {wait}s (attempt {attempt+1}/{retries})...")
                 time.sleep(wait)
-                # Rebuild request (urllib requests can't be reused after error)
                 req = urllib.request.Request(
                     req.full_url, data=req.data,
                     headers=dict(req.headers), method=req.get_method()
@@ -42,13 +43,12 @@ def api_call_with_retry(req, timeout=60, retries=4, backoff=20):
     raise RuntimeError("All retries exhausted")
 
 
-def call_gemini(prompt: str, video_url: str = None) -> str:
-    parts = []
-    if video_url:
-        parts.append({"fileData": {"mimeType": "video/mp4", "fileUri": video_url}})
-    parts.append({"text": prompt})
+# ── GEMINI (text only — no video file) ───────────────────────────────────────
+
+def call_gemini(prompt: str) -> str:
+    """Call Gemini 1.5 Flash 8B with a text-only prompt."""
     payload = {
-        "contents": [{"parts": parts}],
+        "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.3, "maxOutputTokens": 1200}
     }
     url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
@@ -60,6 +60,8 @@ def call_gemini(prompt: str, video_url: str = None) -> str:
     result = api_call_with_retry(req, timeout=60)
     return result["candidates"][0]["content"]["parts"][0]["text"].strip()
 
+
+# ── DEEPSEEK ──────────────────────────────────────────────────────────────────
 
 def call_deepseek(system: str, user: str) -> str:
     payload = {
@@ -78,15 +80,18 @@ def call_deepseek(system: str, user: str) -> str:
     return result["choices"][0]["message"]["content"].strip()
 
 
+# ── CS153 ─────────────────────────────────────────────────────────────────────
+
 def get_latest_cs153_video() -> dict:
+    """Fetch latest CS153 video metadata from YouTube RSS."""
     try:
         feed_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={CS153_CHANNEL_ID}"
         req = urllib.request.Request(feed_url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=15) as resp:
             root = ET.fromstring(resp.read())
         ns = {"atom": "http://www.w3.org/2005/Atom",
-              "yt": "http://www.youtube.com/xml/schemas/2015",
-              "media": "http://search.yahoo.com/mrss/"}
+              "yt":   "http://www.youtube.com/xml/schemas/2015",
+              "media":"http://search.yahoo.com/mrss/"}
         entry = root.find("atom:entry", ns)
         if entry is None:
             return {}
@@ -94,46 +99,73 @@ def get_latest_cs153_video() -> dict:
         title     = entry.findtext("atom:title",     default="", namespaces=ns)
         published = entry.findtext("atom:published", default="", namespaces=ns)
         desc_el   = entry.find("media:group/media:description", ns)
-        desc      = desc_el.text[:2000] if desc_el is not None else ""
-        return {"title": title, "url": f"https://www.youtube.com/watch?v={video_id}",
+        desc      = desc_el.text[:1000] if desc_el is not None else ""
+        return {"title": title, "video_id": video_id,
+                "url": f"https://www.youtube.com/watch?v={video_id}",
                 "published": published[:10], "description": desc}
     except Exception as e:
         print(f"    Could not fetch CS153 RSS: {e}")
         return {}
 
 
+def get_transcript(video_id: str) -> str:
+    """Fetch YouTube transcript using youtube-transcript-api."""
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=["en"])
+        # Join all text chunks into one string
+        full_text = " ".join(chunk["text"] for chunk in transcript)
+        # Trim to max chars to keep Gemini prompt reasonable
+        if len(full_text) > MAX_TRANSCRIPT_CHARS:
+            full_text = full_text[:MAX_TRANSCRIPT_CHARS] + "... [transcript trimmed]"
+        print(f"    Transcript fetched: {len(full_text):,} chars")
+        return full_text
+    except Exception as e:
+        print(f"    Transcript unavailable: {e}")
+        return ""
+
+
 def generate_cs153_section(video: dict) -> str:
+    """Generate CS153 digest from transcript (falls back to description)."""
     if not video:
         return "_CS153 video unavailable today._"
+
+    # Try transcript first, fall back to description
+    transcript = get_transcript(video.get("video_id", ""))
+    content_label = "TRANSCRIPT" if transcript else "DESCRIPTION"
+    content_text  = transcript if transcript else video.get("description", "No description available.")
 
     prompt = f"""You are an expert AI educator. Break down this Stanford CS153 lecture for a motivated learner.
 
 Video: {video['title']}
 Published: {video['published']}
-Description: {video['description']}
+{content_label}:
+{content_text}
 
-Produce EXACTLY these sections, no preamble:
+Produce EXACTLY these sections — no preamble, no intro sentence:
 
 WHAT THIS LECTURE IS ABOUT
-One sentence.
+One clear sentence.
 
 KEY CONCEPTS (exactly 4)
-• Concept Name: 2 sentences — what it is and why it matters.
+• **Concept Name**: 2 sentences — what it is and why it matters in the real world.
 
 HOW TO APPLY THIS
-3 concrete actionable bullet points someone could act on today.
+3 concrete actionable bullet points someone could act on today — in a project, job, or experiment.
 
 REFLECT ON THIS
-2 thought-provoking questions to sit with.
+2 thought-provoking questions to sit with after watching.
 
 WATCH: {video['url']}"""
 
     try:
-        return call_gemini(prompt, video_url=video["url"])
+        return call_gemini(prompt)
     except Exception as e:
         print(f"    Gemini failed ({e}) — skipping CS153, sending news only.")
-        return f"_CS153 digest unavailable today (API error). [Watch directly]({video['url']})_"
+        return f"_CS153 digest unavailable today. [Watch directly]({video['url']})_"
 
+
+# ── NEWS ──────────────────────────────────────────────────────────────────────
 
 def generate_news_section(topic: str, sources: str) -> str:
     today = datetime.date.today().strftime("%B %d, %Y")
@@ -145,6 +177,8 @@ Rules: exactly 3 stories, one sentence each, last 24hrs only."""
     return call_deepseek(system, user)
 
 
+# ── EMAIL ─────────────────────────────────────────────────────────────────────
+
 def build_html(date, cs153, tech, politics, business):
     import re
     date_str = date.strftime("%A, %B %d, %Y")
@@ -152,8 +186,8 @@ def build_html(date, cs153, tech, politics, business):
 
     def md(text):
         text = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', text)
-        text = re.sub(r'\*(.*?)\*', r'<em>\1</em>', text)
-        text = re.sub(r'^[•\-] (.*)', r'<li>\1</li>', text, flags=re.MULTILINE)
+        text = re.sub(r'\*(.*?)\*',     r'<em>\1</em>', text)
+        text = re.sub(r'^[•\-] (.*)',   r'<li>\1</li>', text, flags=re.MULTILINE)
         text = text.replace('\n\n', '</p><p>').replace('\n', '<br>')
         return f"<p>{text}</p>"
 
@@ -184,6 +218,8 @@ def send_email(subject, html_body):
         server.sendmail(GMAIL_ADDRESS, TO_EMAIL, msg.as_string())
 
 
+# ── MAIN ──────────────────────────────────────────────────────────────────────
+
 def main():
     today = datetime.date.today()
     print(f"[morning_brief] {today} — starting...")
@@ -191,9 +227,8 @@ def main():
     print("  → CS153: fetching latest video...")
     video = get_latest_cs153_video()
 
-    print("  → CS153: waiting 10s before Gemini call...")
-    time.sleep(10)
-    print("  → CS153: generating Gemini digest...")
+    print("  → CS153: fetching transcript...")
+    # transcript is fetched inside generate_cs153_section
     cs153 = generate_cs153_section(video)
 
     time.sleep(3)
