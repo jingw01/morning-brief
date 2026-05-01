@@ -2,10 +2,8 @@ name: Morning Brief
 
 on:
   schedule:
-    # 6:00 AM PT = 14:00 UTC (UTC-8 in winter / UTC-7 in summer)
-    # Using 14:00 UTC which = 6am PT (PST). In PDT season it runs at 7am — adjust to 13:00 if needed.
-    - cron: '0 14 * * *'
-  workflow_dispatch:  # lets you trigger it manually from GitHub to test
+    - cron: '0 14 * * *'  # 6 AM PT (PST). Change to 13:00 for PDT season.
+  workflow_dispatch:
 
 jobs:
   send-brief:
@@ -20,6 +18,9 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Install dependencies
+        run: pip install youtube-transcript-api
+
       - name: Run morning brief
         env:
           GEMINI_API_KEY:   ${{ secrets.GEMINI_API_KEY }}
@@ -27,4 +28,4 @@ jobs:
           GMAIL_ADDRESS:    ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASS:   ${{ secrets.GMAIL_APP_PASS }}
           TO_EMAIL:         ${{ secrets.TO_EMAIL }}
-        run: python morning_brief_v2.py
+        run: python morning_brief_final.py
