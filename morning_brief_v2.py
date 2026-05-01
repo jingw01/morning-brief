@@ -130,20 +130,9 @@ WATCH: {video['url']}"""
 
     try:
         return call_gemini(prompt, video_url=video["url"])
-    except urllib.error.HTTPError as e:
-        if e.code == 429:
-            print("    Gemini quota exhausted — falling back to description-only summary.")
-            return f"""**{video['title']}**
-
-Gemini API quota was exceeded today — here's the raw description to read yourself:
-
-{video['description'][:800]}...
-
-[Watch the full lecture]({video['url']})"""
-        raise
     except Exception as e:
-        print(f"    Gemini failed: {e}")
-        return f"_CS153 digest unavailable today. [Watch directly]({video['url']})_"
+        print(f"    Gemini failed ({e}) — skipping CS153, sending news only.")
+        return f"_CS153 digest unavailable today (API error). [Watch directly]({video['url']})_"
 
 
 def generate_news_section(topic: str, sources: str) -> str:
