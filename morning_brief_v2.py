@@ -202,6 +202,8 @@ def main():
     print("  → CS153: fetching latest video...")
     video = get_latest_cs153_video()
 
+    print("  → CS153: waiting 10s before Gemini call...")
+    time.sleep(10)
     print("  → CS153: generating Gemini digest...")
     cs153 = generate_cs153_section(video)
 
