@@ -93,7 +93,7 @@ def get_cs153_video():
     title    = entry.findtext("atom:title",     default="", namespaces=ns)
     pub      = entry.findtext("atom:published", default="", namespaces=ns)
     desc_el  = entry.find("media:group/media:description", ns)
-    desc     = desc_el.text[:1000] if desc_el is not None else ""
+    desc     = ( desc_el.text or "" )[:1000] if desc_el is not None else ""
 
     print(f"Selected video: {video_id} | {title[:70]}")
     return {
