@@ -9,9 +9,11 @@ DEEPSEEK_API_KEY = os.environ["DEEPSEEK_API_KEY"]
 GMAIL_ADDRESS    = os.environ["GMAIL_ADDRESS"]
 GMAIL_APP_PASS   = os.environ["GMAIL_APP_PASS"]
 TO_EMAIL         = os.environ.get("TO_EMAIL", GMAIL_ADDRESS)
-CS153_CHANNEL_ID = "UC0YBJCRIt4kA2jZ7siTGMyQ"
-SKIP_KEYWORDS    = ["office hours", "q&a", "panel", "discussion"]
-MAX_TRANSCRIPT   = 12000
+CS153_CHANNEL_ID  = "UC0YBJCRIt4kA2jZ7siTGMyQ"
+SKIP_KEYWORDS     = ["office hours", "q&a", "panel", "discussion"]
+MAX_TRANSCRIPT    = 12000
+PICKS_FILE        = "last_picks.json"
+MAX_RECENT_PICKS  = 7
 
 # Market cap priority order for ranking multiple earnings
 TICKER_PRIORITY = ["AAPL","MSFT","NVDA","GOOGL","AMZN","META","TSLA","NFLX",
@@ -83,14 +85,14 @@ def get_cs153_video():
           "media": "http://search.yahoo.com/mrss/"}
     entries = root.findall("atom:entry", ns)
     print(f"Found {len(entries)} videos in RSS")
-    entry = None
-    for e in entries:
-        title = e.findtext("atom:title", default="", namespaces=ns).lower()
-        if not any(kw in title for kw in SKIP_KEYWORDS):
-            entry = e
-            break
-    if entry is None:
-        entry = entries[0]
+    valid = [e for e in entries
+             if not any(kw in e.findtext("atom:title", default="", namespaces=ns).lower()
+                        for kw in SKIP_KEYWORDS)]
+    if not valid:
+        valid = entries
+    # Rotate through available lectures so each day shows a different video
+    day_index = datetime.date.today().toordinal() % len(valid)
+    entry = valid[day_index]
     video_id = entry.findtext("yt:videoId",    default="", namespaces=ns)
     title    = entry.findtext("atom:title",     default="", namespaces=ns)
     pub      = entry.findtext("atom:published", default="", namespaces=ns)
@@ -234,15 +236,36 @@ If no major tech earnings today, return: {{"earnings": []}}"""
         print(f"  Earnings finder failed: {e}")
         return []
 
+def load_recent_picks():
+    try:
+        with open(PICKS_FILE) as f:
+            return json.load(f).get("recent", [])
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+def save_pick(ticker):
+    recent = load_recent_picks()
+    if ticker in recent:
+        recent.remove(ticker)
+    recent.insert(0, ticker)
+    recent = recent[:MAX_RECENT_PICKS]
+    with open(PICKS_FILE, "w") as f:
+        json.dump({"recent": recent}, f, indent=2)
+    print(f"  Saved pick {ticker}. Recent 7: {recent}")
+
 def find_rising_company():
     """Ask DeepSeek to pick the most interesting rising tech company for a deep dive."""
+    today_str = datetime.date.today().strftime("%B %d, %Y")
+    recent = load_recent_picks()
+    exclude_clause = (f"\nDo NOT pick any of these recently covered tickers: {', '.join(recent)}."
+                      if recent else "")
     system = "Financial analyst. Respond in JSON only. No markdown."
-    user = """Pick the single most interesting rising or high-momentum tech company right now for a deep dive — 
-not one of the mega-cap stalwarts (no AAPL, MSFT, GOOGL, AMZN). 
-Think: breakout growth, key narrative shift, emerging category leader, or recent catalyst.
+    user = f"""Today is {today_str}. Pick the single most interesting rising or high-momentum tech company to deep dive on TODAY —
+not one of the mega-cap stalwarts (no AAPL, MSFT, GOOGL, AMZN).{exclude_clause}
+Think: breakout growth this week, key narrative shift, emerging category leader, or a recent catalyst from the last few days.
 
 Respond with ONLY valid JSON:
-{"ticker": "PLTR", "company": "Palantir", "reason": "AIP platform driving rapid enterprise adoption with accelerating US commercial growth"}"""
+{{"ticker": "PLTR", "company": "Palantir", "reason": "AIP platform driving rapid enterprise adoption with accelerating US commercial growth"}}"""
     try:
         raw = call_deepseek(system, user, max_tokens=200)
         return parse_json_response(raw)
@@ -309,6 +332,7 @@ def earnings_section():
     prompt = DEEP_DIVE_PROMPT.format(company=company, ticker=ticker)
     try:
         analysis = call_gemini(prompt, max_tokens=1000)
+        save_pick(ticker)
         return {"mode": "deepdive", "ticker": ticker, "company": company,
                 "reason": reason, "analysis": analysis}
     except Exception as e:
