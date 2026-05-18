@@ -90,9 +90,11 @@ def get_cs153_video():
                         for kw in SKIP_KEYWORDS)]
     if not valid:
         valid = entries
-    # Rotate through available lectures so each day shows a different video
-    day_index = datetime.date.today().toordinal() % len(valid)
-    entry = valid[day_index]
+    # Pick the most recent lecture not covered in the last 7 days
+    seen = set(load_recent_cs153())
+    unseen = [e for e in valid
+              if e.findtext("yt:videoId", default="", namespaces=ns) not in seen]
+    entry = unseen[0] if unseen else valid[0]
     video_id = entry.findtext("yt:videoId",    default="", namespaces=ns)
     title    = entry.findtext("atom:title",     default="", namespaces=ns)
     pub      = entry.findtext("atom:published", default="", namespaces=ns)
@@ -236,22 +238,42 @@ If no major tech earnings today, return: {{"earnings": []}}"""
         print(f"  Earnings finder failed: {e}")
         return []
 
-def load_recent_picks():
+def _load_picks_file():
     try:
         with open(PICKS_FILE) as f:
-            return json.load(f).get("recent", [])
+            return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        return []
+        return {}
+
+def _save_picks_file(data):
+    with open(PICKS_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+def load_recent_picks():
+    return _load_picks_file().get("deep_dive", [])
 
 def save_pick(ticker):
-    recent = load_recent_picks()
+    data = _load_picks_file()
+    recent = data.get("deep_dive", [])
     if ticker in recent:
         recent.remove(ticker)
     recent.insert(0, ticker)
-    recent = recent[:MAX_RECENT_PICKS]
-    with open(PICKS_FILE, "w") as f:
-        json.dump({"recent": recent}, f, indent=2)
-    print(f"  Saved pick {ticker}. Recent 7: {recent}")
+    data["deep_dive"] = recent[:MAX_RECENT_PICKS]
+    _save_picks_file(data)
+    print(f"  Saved deep dive pick {ticker}. Recent: {data['deep_dive']}")
+
+def load_recent_cs153():
+    return _load_picks_file().get("cs153", [])
+
+def save_cs153_video(video_id):
+    data = _load_picks_file()
+    recent = data.get("cs153", [])
+    if video_id in recent:
+        recent.remove(video_id)
+    recent.insert(0, video_id)
+    data["cs153"] = recent[:MAX_RECENT_PICKS]
+    _save_picks_file(data)
+    print(f"  Saved CS153 video {video_id}. Recent: {data['cs153']}")
 
 def find_rising_company():
     """Ask DeepSeek to pick the most interesting rising tech company for a deep dive."""
@@ -407,6 +429,7 @@ def main():
     print("\n--- CS153 ---")
     video = get_cs153_video()
     cs153 = cs153_section(video)
+    save_cs153_video(video["video_id"])
 
     time.sleep(3)
 
