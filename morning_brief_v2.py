@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, json, time, smtplib, datetime, urllib.request, urllib.error
+import os, json, time, smtplib, datetime, urllib.request, urllib.error, urllib.parse
 import xml.etree.ElementTree as ET
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -362,13 +362,58 @@ def earnings_section():
         return None
 
 # ── NEWS ──────────────────────────────────────────────────────────────────────
-def news_section(topic, sources):
+def fetch_rss_headlines(query, max_age_hours=24):
+    """Fetch real headlines from Google News RSS for a given query."""
+    from email.utils import parsedate_to_datetime
+    url = ("https://news.google.com/rss/search?q="
+           + urllib.parse.quote(query)
+           + "&hl=en-US&gl=US&ceid=US:en")
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        root = ET.fromstring(resp.read())
+    now     = datetime.datetime.now(datetime.timezone.utc)
+    cutoff  = now - datetime.timedelta(hours=max_age_hours)
+    headlines = []
+    for item in root.findall(".//item"):
+        title = (item.findtext("title") or "").strip()
+        if not title:
+            continue
+        try:
+            pub = parsedate_to_datetime(item.findtext("pubDate") or "")
+            if pub < cutoff:
+                continue
+        except Exception:
+            pass
+        headlines.append(title)
+        if len(headlines) >= 10:
+            break
+    return headlines
+
+def news_section(topic, query):
     today = datetime.date.today().strftime("%B %d, %Y")
-    system = "Sharp neutral news editor. Markdown only, no preamble."
-    user   = (f"Today is {today}. Top 3 {topic} stories last 24hrs from {sources}.\n"
-              f"Format: **Headline** — One sentence. *(Source)*\n"
-              f"Rules: exactly 3 stories, one sentence each, last 24hrs only.")
-    return call_deepseek(system, user)
+    try:
+        headlines = fetch_rss_headlines(query)
+        if not headlines:
+            headlines = fetch_rss_headlines(query, max_age_hours=48)
+        print(f"  RSS: {len(headlines)} headlines for '{topic}'")
+    except Exception as e:
+        print(f"  RSS failed ({e}), falling back to DeepSeek")
+        system = "Sharp neutral news editor. Markdown only, no preamble."
+        user   = (f"Today is {today}. Top 3 {topic} stories last 24hrs.\n"
+                  f"Format: **Headline** — One sentence. *(Source)*\n"
+                  f"Rules: exactly 3 stories, one sentence each.")
+        return call_deepseek(system, user)
+
+    headlines_text = "\n".join(f"- {h}" for h in headlines)
+    prompt = f"""Today is {today}. These are real, current headlines from Google News — {topic}:
+
+{headlines_text}
+
+Pick the 3 most important stories and write exactly:
+**Headline** — One-sentence summary. *(Source)*
+
+Exactly 3 items. No preamble."""
+    return call_gemini(prompt, max_tokens=400)
 
 # ── EMAIL ─────────────────────────────────────────────────────────────────────
 def build_html(date, cs153, tech, politics, business, earnings_data=None):
@@ -439,9 +484,9 @@ def main():
     time.sleep(3)
 
     print("\n--- NEWS ---")
-    tech     = news_section("technology and AI", "TechCrunch, The Verge, Ars Technica")
-    politics = news_section("US and world politics", "AP News, Politico, Reuters")
-    business = news_section("business and markets", "WSJ, Bloomberg, FT")
+    tech     = news_section("technology and AI",    "AI technology")
+    politics = news_section("US and world politics", "US politics world news")
+    business = news_section("business and markets",  "business markets economy")
 
     print("\n--- EMAIL ---")
     send_email(

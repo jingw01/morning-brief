@@ -2,7 +2,7 @@ name: Morning Brief
 
 on:
   schedule:
-    - cron: '0 14 * * *'  # 6 AM PT (PST). Change to 13:00 for PDT season.
+    - cron: '0 13 * * *'  # 6 AM PDT (UTC-7, Mar–Nov). Change to 14:00 for PST season.
   workflow_dispatch:
 
 permissions:
