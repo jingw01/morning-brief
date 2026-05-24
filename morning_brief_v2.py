@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, json, time, smtplib, datetime, urllib.request, urllib.error, urllib.parse
+import os, json, time, smtplib, datetime, urllib.request, urllib.error
 import xml.etree.ElementTree as ET
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -14,6 +14,24 @@ SKIP_KEYWORDS     = ["office hours", "q&a", "panel", "discussion"]
 MAX_TRANSCRIPT    = 12000
 PICKS_FILE        = "last_picks.json"
 MAX_RECENT_PICKS  = 7
+
+# Direct RSS feeds per topic — ordered by preference; first one that returns headlines wins
+TECH_FEEDS = [
+    "https://techcrunch.com/feed/",
+    "https://www.theverge.com/rss/index.xml",
+    "https://feeds.arstechnica.com/arstechnica/index",
+    "https://feeds.bbci.co.uk/news/technology/rss.xml",
+]
+POLITICS_FEEDS = [
+    "https://feeds.bbci.co.uk/news/world/rss.xml",
+    "https://feeds.bbci.co.uk/news/rss.xml",
+    "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
+]
+BUSINESS_FEEDS = [
+    "https://feeds.bbci.co.uk/news/business/rss.xml",
+    "https://feeds.bbci.co.uk/news/rss.xml",
+    "https://rss.nytimes.com/services/xml/rss/nyt/Business.xml",
+]
 
 # Market cap priority order for ranking multiple earnings
 TICKER_PRIORITY = ["AAPL","MSFT","NVDA","GOOGL","AMZN","META","TSLA","NFLX",
@@ -362,57 +380,85 @@ def earnings_section():
         return None
 
 # ── NEWS ──────────────────────────────────────────────────────────────────────
-def fetch_rss_headlines(query, max_age_hours=24):
-    """Fetch real headlines from Google News RSS for a given query."""
+def _parse_pub_date(pub_str):
+    """Parse RSS 2.0 (RFC 2822) or Atom (ISO 8601) publication dates."""
     from email.utils import parsedate_to_datetime
-    url = ("https://news.google.com/rss/search?q="
-           + urllib.parse.quote(query)
-           + "&hl=en-US&gl=US&ceid=US:en")
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        root = ET.fromstring(resp.read())
-    now     = datetime.datetime.now(datetime.timezone.utc)
-    cutoff  = now - datetime.timedelta(hours=max_age_hours)
-    headlines = []
-    for item in root.findall(".//item"):
-        title = (item.findtext("title") or "").strip()
-        if not title:
-            continue
-        try:
-            pub = parsedate_to_datetime(item.findtext("pubDate") or "")
-            if pub < cutoff:
-                continue
-        except Exception:
-            pass
-        headlines.append(title)
-        if len(headlines) >= 10:
-            break
-    return headlines
-
-def news_section(topic, query):
-    today = datetime.date.today().strftime("%B %d, %Y")
+    if not pub_str:
+        return None
     try:
-        headlines = fetch_rss_headlines(query)
-        if not headlines:
-            headlines = fetch_rss_headlines(query, max_age_hours=48)
-        print(f"  RSS: {len(headlines)} headlines for '{topic}'")
-    except Exception as e:
-        print(f"  RSS failed ({e}), falling back to DeepSeek")
-        system = "Sharp neutral news editor. Markdown only, no preamble."
-        user   = (f"Today is {today}. Top 3 {topic} stories last 24hrs.\n"
-                  f"Format: **Headline** — One sentence. *(Source)*\n"
-                  f"Rules: exactly 3 stories, one sentence each.")
-        return call_deepseek(system, user)
+        return parsedate_to_datetime(pub_str)           # RFC 2822
+    except Exception:
+        pass
+    try:
+        dt = datetime.datetime.fromisoformat(pub_str.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+def fetch_rss_headlines(feed_urls, max_age_hours=36):
+    """Try each feed URL in order; return headlines from the first that yields results."""
+    ATOM = "http://www.w3.org/2005/Atom"
+    now    = datetime.datetime.now(datetime.timezone.utc)
+    cutoff = now - datetime.timedelta(hours=max_age_hours)
+
+    for url in feed_urls:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                raw = resp.read()
+            root = ET.fromstring(raw)
+
+            # RSS 2.0 uses <item>; Atom uses <entry>
+            items = root.findall(".//item")
+            if not items:
+                items = root.findall(f".//{{{ATOM}}}entry")
+
+            headlines = []
+            for item in items[:25]:
+                title = (item.findtext("title")
+                         or item.findtext(f"{{{ATOM}}}title") or "").strip()
+                if not title:
+                    continue
+                pub_str = (item.findtext("pubDate")
+                           or item.findtext(f"{{{ATOM}}}published") or "")
+                pub_dt = _parse_pub_date(pub_str)
+                if pub_dt and pub_dt < cutoff:
+                    continue
+                headlines.append(title)
+                if len(headlines) >= 10:
+                    break
+
+            if headlines:
+                print(f"  RSS OK ({len(headlines)} headlines): {url}")
+                return headlines
+            print(f"  RSS: no recent headlines from {url}")
+        except Exception as e:
+            print(f"  RSS failed for {url}: {type(e).__name__}: {e}")
+
+    return []
+
+def news_section(topic, feed_urls):
+    today = datetime.date.today().strftime("%B %d, %Y")
+    headlines = fetch_rss_headlines(feed_urls)
+    if not headlines:
+        # Widen window to 72h before giving up
+        headlines = fetch_rss_headlines(feed_urls, max_age_hours=72)
+
+    if not headlines:
+        print(f"  All RSS feeds failed for '{topic}' — skipping DeepSeek fallback")
+        return f"_News unavailable today ({topic})._"
 
     headlines_text = "\n".join(f"- {h}" for h in headlines)
-    prompt = f"""Today is {today}. These are real, current headlines from Google News — {topic}:
+    prompt = f"""Today is {today}. These are real, live headlines fetched from RSS feeds — {topic}:
 
 {headlines_text}
 
-Pick the 3 most important stories and write exactly:
-**Headline** — One-sentence summary. *(Source)*
+Pick the 3 most important and interesting stories. Write exactly:
+**Headline** — One-sentence summary of what happened. *(Source)*
 
-Exactly 3 items. No preamble."""
+Exactly 3 items. No preamble. Do not invent or rewrite headlines — use the titles above."""
     return call_gemini(prompt, max_tokens=400)
 
 # ── EMAIL ─────────────────────────────────────────────────────────────────────
@@ -484,9 +530,9 @@ def main():
     time.sleep(3)
 
     print("\n--- NEWS ---")
-    tech     = news_section("technology and AI",    "AI technology")
-    politics = news_section("US and world politics", "US politics world news")
-    business = news_section("business and markets",  "business markets economy")
+    tech     = news_section("technology and AI",    TECH_FEEDS)
+    politics = news_section("US and world politics", POLITICS_FEEDS)
+    business = news_section("business and markets",  BUSINESS_FEEDS)
 
     print("\n--- EMAIL ---")
     send_email(
