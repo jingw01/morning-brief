@@ -1,12 +1,12 @@
 {
   "deep_dive": [
+    "ARM",
     "NBIS",
     "APP",
     "CRDO",
     "SMCI",
     "VRT",
-    "RGTI",
-    "IONQ"
+    "RGTI"
   ],
   "cs153": [
     "aTSNCQFVPAg"
