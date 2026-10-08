@@ -1,12 +1,12 @@
 {
   "deep_dive": [
+    "NBIS",
     "APP",
     "CRDO",
     "SNOW",
     "ALAB",
     "RKLB",
-    "IONQ",
-    "ARM"
+    "IONQ"
   ],
   "cs153": [
     "aTSNCQFVPAg"
