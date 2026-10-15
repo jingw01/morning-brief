@@ -1,12 +1,12 @@
 {
   "deep_dive": [
+    "APP",
     "CRDO",
     "ANET",
     "ALAB",
     "RKLB",
     "IONQ",
-    "HOOD",
-    "NBIS"
+    "HOOD"
   ],
   "cs153": [
     "aTSNCQFVPAg"
